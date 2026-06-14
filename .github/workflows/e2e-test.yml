@@ -39,6 +39,14 @@ jobs:
     # For now, we will just use `kind load docker-image`.
     - name: Run E2E Test Script
       run: |
-        # Replace the `docker exec -i iicpc-cluster-control-plane ctr` with `kind load docker-image` for CI
+        # Replace the `docker exec` with `kind load` for CI
         sed -i 's/docker save \(.*\) | docker exec -i iicpc-cluster-control-plane ctr -n k8s.io images import -/kind load docker-image \1/g' manage_infra.sh
+        
+        # GitHub Actions free runners only have 2 CPUs and 7GB RAM. 
+        # The worker requests 4 CPUs * 3 replicas = 12 CPUs, which will stay Pending forever.
+        # Patch the deployment for CI constraints:
+        sed -i 's/replicas: 3/replicas: 1/g' k8s/worker.yaml
+        sed -i 's/cpu: "4"/cpu: "1"/g' k8s/worker.yaml
+        sed -i 's/memory: "2Gi"/memory: "512Mi"/g' k8s/worker.yaml
+        
         ./test_infra.sh

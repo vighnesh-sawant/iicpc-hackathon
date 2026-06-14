@@ -30,12 +30,12 @@ if [ "$1" == "up" ]; then
     kubectl apply -f k8s/
 
     echo -e "\n${CYAN}Waiting for pods to be ready...${NC}"
-    kubectl wait --for=condition=ready pod -l app=minio --timeout=120s || true
-    kubectl wait --for=condition=ready pod -l app=kafka --timeout=120s || true
-    kubectl wait --for=condition=ready pod -l app=postgres --timeout=120s || true
-    kubectl wait --for=condition=ready pod -l app=backend --timeout=120s || true
-    kubectl wait --for=condition=ready pod -l app=frontend --timeout=120s || true
-    kubectl wait --for=condition=ready pod -l app=worker --timeout=120s || true
+    kubectl wait --for=condition=ready pod -l app=minio --timeout=120s
+    kubectl wait --for=condition=ready pod -l app=kafka --timeout=120s
+    kubectl wait --for=condition=ready pod -l app=postgres --timeout=120s
+    kubectl wait --for=condition=ready pod -l app=backend --timeout=120s
+    kubectl wait --for=condition=ready pod -l app=frontend --timeout=120s
+    kubectl wait --for=condition=ready pod -l app=worker --timeout=120s
 
     echo -e "\n${GREEN}✓ Infrastructure is UP and READY!${NC}"
 

@@ -20,6 +20,8 @@ const KAFKA_BROKER      = process.env.KAFKA_BROKER       || 'localhost:9092';
 const BOT_FLEET_PATH    = process.env.BOT_FLEET_PATH     || path.resolve(__dirname, '../../engine/bot_fleet');
 const WORK_DIR          = process.env.WORK_DIR            || path.resolve(__dirname, '../../temp_uploads');
 const BENCHMARK_DURATION = parseInt(process.env.BENCHMARK_DURATION || '5');
+const EBPF_PROBE_PATH   = process.env.EBPF_PROBE_PATH    || path.resolve(__dirname, '../../engine/ebpf/latency_probe.o');
+const EBPF_READER_PATH  = process.env.EBPF_READER_PATH   || path.resolve(__dirname, '../../engine/ebpf/latency_reader');
 
 // --- S3 Client ---
 const s3Client = new S3Client({
@@ -61,6 +63,9 @@ function runBenchmark(binaryPath, runId) {
     const jailDir = `/var/hackathon/jails/team_${shortId}`;
     const jailIp = '10.0.0.2';
 
+    let ebpfProbe = null;
+    let ebpfOutput = '';
+
     try {
       // 1. Setup Network Namespace and veth pipe
       execSync(`ip netns add ns_${shortId} || true`);
@@ -71,6 +76,37 @@ function runBenchmark(binaryPath, runId) {
       execSync(`ip link set vh${shortId} up`);
       execSync(`ip netns exec ns_${shortId} ip link set vj${shortId} up`);
       execSync(`ip netns exec ns_${shortId} ip link set lo up`);
+
+      // 1b. Launch eBPF latency probe on the host-side veth interface.
+      //     It attaches TC egress/ingress hooks to measure wire-to-wire RTT
+      //     for every NetworkOrder → ExecReport pair.
+      try {
+        const readerExists = fs.existsSync(EBPF_READER_PATH);
+        const probeExists = fs.existsSync(EBPF_PROBE_PATH);
+        console.log(`[eBPF] Reader binary: ${EBPF_READER_PATH} (exists=${readerExists})`);
+        console.log(`[eBPF] Probe object:  ${EBPF_PROBE_PATH} (exists=${probeExists})`);
+
+        if (readerExists && probeExists) {
+          ebpfProbe = spawn(EBPF_READER_PATH, [`vh${shortId}`, EBPF_PROBE_PATH], {
+            stdio: ['ignore', 'pipe', 'pipe'],
+          });
+          ebpfProbe.stdout.on('data', d => { ebpfOutput += d.toString(); });
+          ebpfProbe.stderr.on('data', d => console.log(`[eBPF] ${d.toString().trim()}`));
+          ebpfProbe.on('error', (err) => {
+            console.log(`[eBPF] Process error: ${err.message}`);
+            ebpfProbe = null;
+          });
+          ebpfProbe.on('exit', (code, signal) => {
+            console.log(`[eBPF] Reader exited: code=${code} signal=${signal}`);
+          });
+          console.log(`[eBPF] Spawned latency reader on vh${shortId} (pid=${ebpfProbe.pid})`);
+        } else {
+          console.log('[eBPF] Probe binaries not found, using synthetic latency model');
+        }
+      } catch (e) {
+        console.log(`[eBPF] Failed to start probe: ${e.message}`);
+        ebpfProbe = null;
+      }
 
       // 2. Setup chroot jail
       fs.mkdirSync(jailDir, { recursive: true });
@@ -112,6 +148,7 @@ function runBenchmark(binaryPath, runId) {
 
     // Cleanup helper
     const cleanup = () => {
+      try { if (ebpfProbe) ebpfProbe.kill('SIGTERM'); } catch {}
       try {
         execSync(`ip link delete vh${shortId} || true`);
         execSync(`ip netns delete ns_${shortId} || true`);
@@ -210,18 +247,58 @@ function runBenchmark(binaryPath, runId) {
         const finalizeResults = () => {
           clearInterval(engineDeathWatcher);
           try { bots.kill('SIGTERM'); } catch {}
+
+          // Signal the eBPF probe to dump its histogram and exit.
+          // Give it 500ms to flush stdout before we read ebpfOutput.
+          try { if (ebpfProbe) ebpfProbe.kill('SIGTERM'); } catch {}
+
           setTimeout(() => {
             try { engine.kill('SIGKILL'); } catch {}
-            cleanup();
+
+            // --- Parse eBPF latency measurements ----------------------
+            console.log(`[eBPF] Raw output (${ebpfOutput.length} bytes): ${ebpfOutput.trim().slice(0, 500) || '(empty)'}`);
+            let ebpf = null;
+            try {
+              const jsonLine = ebpfOutput.trim().split('\n').pop();
+              if (jsonLine) ebpf = JSON.parse(jsonLine);
+            } catch (e) {
+              console.log(`[eBPF] Failed to parse output: ${e.message}`);
+            }
+
+            // If eBPF captured real samples, use them.
+            // Otherwise fall back to the synthetic model.
+            const useEbpf = ebpf && ebpf.samples > 0;
+            if (useEbpf) {
+              console.log(`[eBPF] Using real measurements: ${ebpf.samples.toLocaleString()} samples, ` +
+                          `p50=${ebpf.p50_us.toFixed(1)}µs  p90=${ebpf.p90_us.toFixed(1)}µs  p99=${ebpf.p99_us.toFixed(1)}µs`);
+            } else {
+              console.log('[eBPF] No samples captured, falling back to synthetic latency model');
+            }
+
+            // Convert eBPF µs → ms for the data-point format
+            const peakP50 = useEbpf ? ebpf.p50_us / 1000 : null;
+            const peakP90 = useEbpf ? ebpf.p90_us / 1000 : null;
+            const peakP99 = useEbpf ? ebpf.p99_us / 1000 : null;
+            const baseP   = useEbpf ? ebpf.min_us / 1000 : null;
 
             // Generate throughput-latency curve with 20 evenly spaced points
             const dataPoints = [];
             for (let i = 1; i <= 20; i++) {
               const tps = Math.floor((maxTps / 20) * i);
               const load = tps / (maxTps || 1);
-              const p99 = parseFloat((0.01 + load * 0.08).toFixed(4));
-              const p90 = parseFloat((0.008 + load * 0.05).toFixed(4));
-              const p50 = parseFloat((0.005 + load * 0.02).toFixed(4));
+
+              let p50, p90, p99;
+              if (useEbpf) {
+                // Interpolate from measured baseline → measured peak
+                p50 = parseFloat((baseP + (peakP50 - baseP) * load).toFixed(6));
+                p90 = parseFloat((baseP + (peakP90 - baseP) * load).toFixed(6));
+                p99 = parseFloat((baseP + (peakP99 - baseP) * load).toFixed(6));
+              } else {
+                // Synthetic fallback (original model)
+                p99 = parseFloat((0.01 + load * 0.08).toFixed(4));
+                p90 = parseFloat((0.008 + load * 0.05).toFixed(4));
+                p50 = parseFloat((0.005 + load * 0.02).toFixed(4));
+              }
               dataPoints.push({ tps, p50, p90, p99 });
             }
 
@@ -231,6 +308,8 @@ function runBenchmark(binaryPath, runId) {
               const dTps = Math.abs(dataPoints[i].tps - dataPoints[i - 1].tps);
               aucScore += dTps / dataPoints[i].p99;
             }
+
+            cleanup();
 
             if (!settled) {
               settled = true;
@@ -243,7 +322,7 @@ function runBenchmark(binaryPath, runId) {
                 correctnessTests,
               });
             }
-          }, 500);
+          }, 800);  // 800ms grace period for eBPF flush
         };
 
         // If bots exit early (engine crashed), finalize immediately

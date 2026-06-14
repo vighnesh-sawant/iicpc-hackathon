@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      containers:
+      - name: worker
+        image: iicpc-worker:latest
+        imagePullPolicy: Never
+        env:
+        - name: S3_ENDPOINT
+          value: "http://minio:9000"
+        - name: KAFKA_BROKER
+          value: "kafka:9092"
+        - name: BENCHMARK_DURATION
+          value: "20"
+        resources:
+          requests:
+            cpu: "4"
+            memory: "2Gi"
+          limits:
+            cpu: "4"
+            memory: "2Gi"
+        securityContext:
+          privileged: true
+        livenessProbe:
+          exec:
+            command: ["node", "-e", "process.exit(0)"]
+          initialDelaySeconds: 30
+          periodSeconds: 15
+          failureThreshold: 3

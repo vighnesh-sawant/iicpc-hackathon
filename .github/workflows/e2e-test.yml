@@ -1,0 +1,44 @@
+name: E2E Infrastructure Test
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  test-infra:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Kind (Kubernetes IN Docker)
+      uses: engineerd/setup-kind@v0.5.0
+      with:
+        version: "v0.22.0"
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Verify Kubernetes Cluster
+      run: |
+        kubectl cluster-info
+        kubectl get nodes
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential curl jq
+    
+    # We modify the manage_infra.sh slightly for GH Actions to use `kind load docker-image` instead of `ctr` if needed.
+    # To keep it seamless, we will just set the environment variable USE_KIND=1, but the script currently uses `ctr`.
+    # Let's override `ctr` via a mock or just let manage_infra.sh handle it. Wait, the `manage_infra.sh` hardcodes `iicpc-cluster-control-plane`.
+    # Since kind default name is `kind-control-plane`, we can rename the node or load using `kind load docker-image`.
+    # For now, we will just use `kind load docker-image`.
+    - name: Run E2E Test Script
+      run: |
+        # Replace the `docker exec -i iicpc-cluster-control-plane ctr` with `kind load docker-image` for CI
+        sed -i 's/docker save \(.*\) | docker exec -i iicpc-cluster-control-plane ctr -n k8s.io images import -/kind load docker-image \1/g' manage_infra.sh
+        ./test_infra.sh

@@ -1,0 +1,13 @@
+{
+  "name": "iicpc-worker",
+  "version": "1.0.0",
+  "description": "IICPC Execution Worker - consumes jobs from Kafka, benchmarks engines, publishes results",
+  "main": "worker.js",
+  "scripts": {
+    "start": "node worker.js"
+  },
+  "dependencies": {
+    "kafkajs": "^2.2.4",
+    "@aws-sdk/client-s3": "^3.500.0"
+  }
+}

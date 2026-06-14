@@ -1,0 +1,17 @@
+{
+  "name": "iicpc-backend",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1068.0",
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "kafkajs": "^2.2.4",
+    "multer": "^1.4.5-lts.1",
+    "pg": "^8.13.1",
+    "ws": "^8.16.0"
+  }
+}

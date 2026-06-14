@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  labels:
+    app: backend
+spec:
+  type: NodePort
+  ports:
+  - port: 3001
+    targetPort: 3001
+    nodePort: 30001
+    name: http
+  selector:
+    app: backend
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+      - name: backend
+        image: iicpc-backend:latest
+        imagePullPolicy: Never
+        env:
+        - name: S3_ENDPOINT
+          value: "http://minio:9000"
+        - name: KAFKA_BROKER
+          value: "kafka:9092"
+        - name: DATABASE_URL
+          value: "postgresql://iicpc:iicpc_secret@postgres:5432/iicpc"
+        ports:
+        - containerPort: 3001
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 3001
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 3001
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          failureThreshold: 3
